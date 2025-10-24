@@ -1,73 +1,83 @@
 #!/usr/bin/env python3
-# run_once_debug.py  (replace run_once.py content with this)
+# run_once.py
+# Single-shot runner: imports analyze() from btc_scan and sends Telegram via env vars (robust)
 
-import sys, os, traceback, json, requests
+import os, sys, traceback, requests, json
 
 repo_root = os.path.dirname(__file__)
 sys.path.insert(0, repo_root)
 
-# Read env for quick debug
+# read env secrets
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-def send_debug_telegram(text):
+def send_telegram_http(message_text):
+    """Send plain text to Telegram using HTTP API (fallback sender used by run_once)."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("DEBUG: TELEGRAM token/chat not set, cannot send debug msg.")
-        return
+        print("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set in environment.")
+        return False, "no-token"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message_text}
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-        print("DEBUG: Telegram send status:", resp.status_code, resp.text)
+        r = requests.post(url, json=payload, timeout=15)
+        return (r.status_code == 200), r.text
     except Exception as e:
-        print("DEBUG: Telegram send failed:", e)
+        return False, str(e)
 
-# Attempt import
+# Try to import analyze
 try:
-    from btc_scan import analyze, send_telegram
-    print("DEBUG: Imported analyze() and send_telegram from btc_scan.py")
+    from btc_scan import analyze
+    print("INFO: Imported analyze() from btc_scan.py")
 except Exception as e:
-    print("ERROR: Importing from btc_scan failed:", e)
+    print("ERROR: could not import analyze() from btc_scan.py:", e)
     traceback.print_exc()
-    # Try to notify via telegram (best-effort)
-    send_debug_telegram(f"btc_scan import failed: {e}")
+    # try to notify via Telegram that import failed (best-effort)
+    ok, info = send_telegram_http(f"btc_scan import failed: {e}")
+    print("Tried to notify via Telegram:", ok, info)
     sys.exit(2)
 
 def main():
-    # Print some env/debug info
-    print("DEBUG: TELEGRAM_BOT_TOKEN present?", bool(TELEGRAM_TOKEN))
-    print("DEBUG: TELEGRAM_CHAT_ID present?", bool(TELEGRAM_CHAT_ID))
-    print("DEBUG: pwd:", os.getcwd())
-    print("DEBUG: python:", sys.executable)
     try:
-        # quick test: tell Telegram that the runner started (so we know secrets work)
-        send_debug_telegram("⚙️ GitHub Actions: run_once_debug started (debug msg).")
-    except Exception as e:
-        print("DEBUG: send_debug_telegram failed:", e)
-
-    try:
+        # run analyze()
         result = analyze()
-        # show full repr of result
-        print("DEBUG: analyze() returned:", repr(result))
-        if result is None:
-            print("ERROR: analyze() returned None. Sending debug Telegram.")
-            send_debug_telegram("⚠️ analyze() returned None — check logs.")
+        print("INFO: analyze() returned:", repr(result))
+        if not result:
+            msg = "⚠️ analyze() returned None or empty — nothing to send."
+            print(msg)
+            send_telegram_http(f"BTC scanner: {msg}")
             return 1
-        # if analyze returns dict-like, send via send_telegram if available
+
+        # build a short friendly message
         try:
-            send_telegram(result)
-            print("DEBUG: Called send_telegram(result) - done")
+            # If result is dict-like, format it; else stringify
+            if isinstance(result, dict):
+                price = result.get("price")
+                score = result.get("score")
+                verdict = result.get("verdict")
+                signals = result.get("signals")
+                msg = f"📊 BTC Update\n\n{{'price': {price}, 'score': {score}, 'verdict': '{verdict}', 'signals': {signals}}}"
+            else:
+                msg = f"📊 BTC Update\n\n{result}"
         except Exception as e:
-            print("ERROR: send_telegram failed:", e)
-            traceback.print_exc()
-            # fallback: send plain debug message via HTTP
-            send_debug_telegram(f"send_telegram exception: {e}")
-            return 2
+            msg = f"📊 BTC Update\n\n{repr(result)}"
+
+        ok, info = send_telegram_http(msg)
+        print("INFO: Telegram send ok?", ok, "info:", info)
+        if not ok:
+            # if send failed, log full response
+            print("ERROR: Telegram send failed:", info)
+            return 3
         return 0
+
     except Exception as e:
-        print("EXCEPTION during analyze():", e)
+        print("EXCEPTION in run_once:", e)
         traceback.print_exc()
-        send_debug_telegram(f"Exception in analyze(): {e}\nSee action logs.")
-        return 3
+        # try notify
+        try:
+            send_telegram_http(f"Exception in run_once: {e}\nSee action logs.")
+        except Exception:
+            pass
+        return 4
 
 if __name__ == "__main__":
     rc = main()
