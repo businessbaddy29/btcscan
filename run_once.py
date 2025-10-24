@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-# run_once.py - pretty Telegram formatting (HTML), fallback-friendly
+# run_once.py - robust single-shot runner with pretty Telegram HTML messages
 
-import os, sys, traceback, requests, time
+import os
+import sys
+import traceback
+import time
+import requests
 
 repo_root = os.path.dirname(__file__)
 sys.path.insert(0, repo_root)
 
+# environment secrets (do NOT hardcode)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -27,16 +32,21 @@ def send_telegram_html(html_text):
     except Exception as e:
         return False, str(e)
 
-# Try import analyze()
+# Try to import analyze from btc_scan
 try:
     from btc_scan import analyze
     print("INFO: Imported analyze() from btc_scan.py")
 except Exception as e:
     print("ERROR: could not import analyze() from btc_scan.py:", e)
     traceback.print_exc()
-    send_telegram_html(f"<b>btc_scan import failed</b>\n<code>{e}</code>")
+    # best-effort notify
+    try:
+        send_telegram_html(f"<b>btc_scan import failed</b>\n<code>{e}</code>")
+    except Exception:
+        pass
     sys.exit(2)
 
+# Helper: coinGecko price fallback
 def coingecko_price():
     try:
         r = requests.get("https://api.coingecko.com/api/v3/simple/price",
@@ -48,21 +58,13 @@ def coingecko_price():
         print("CoinGecko fetch failed:", e)
         return None
 
-def verdict_emoji(verdict_str):
-    v = (verdict_str or "").upper()
-    if "BUY" in v:
-        return "🟢"
-    if "SELL" in v:
-        return "🔴"
-    return "🟡"
-
+# The pretty HTML builder with Hindi summary
 def build_html_message(result, fallback=False):
     """
-    Builds a nice HTML message. Uses bold labels and <code> for monospace numeric block.
+    Builds a nice HTML message. Uses bold labels and <code> for numbers.
     Also appends a short Hindi summary based on the score.
     """
     if not result or not isinstance(result, dict):
-        # fallback simple message
         price = None
         if isinstance(result, (int, float)):
             price = result
@@ -70,12 +72,12 @@ def build_html_message(result, fallback=False):
             return f"<b>📊 BTC Fallback Update</b>\n<pre>price: {price:.2f} USD</pre>\n\n<i>💬 डेटा सीमित है — यह fallback सूचना है।</i>"
         return "<b>📊 BTC Update</b>\n<pre>No price available</pre>\n\n<i>💬 डेटा उपलब्ध नहीं है।</i>"
 
-    # safe conversion helper
-    def safe_num(x, digits=3):
+    # safe number conversion
+    def safe_num(x):
         try:
             return float(x)
         except Exception:
-            return x
+            return None
 
     price = safe_num(result.get("price"))
     score = safe_num(result.get("score"))
@@ -115,7 +117,7 @@ def build_html_message(result, fallback=False):
 
     parts = [header, price_line, score_line, verdict_line, "", "<b>Signals</b>"] + sig_lines
 
-    # ---- Summary section (Hindi) ----
+    # Summary (Hindi) based on score
     summary = ""
     if isinstance(score, float):
         if score >= 0.6:
@@ -131,6 +133,52 @@ def build_html_message(result, fallback=False):
     parts.append(f"<i>{summary}</i>")
 
     return "\n".join(parts)
+
+def main():
+    print("DEBUG: Starting run_once at", time.strftime("%Y-%m-%d %H:%M:%S"))
+    print("DEBUG: TELEGRAM present?", bool(TELEGRAM_TOKEN), bool(TELEGRAM_CHAT_ID))
+
+    try:
+        result = analyze()
+        print("DEBUG: analyze() returned:", repr(result))
+    except Exception as e:
+        print("ERROR: Exception when running analyze():", e)
+        traceback.print_exc()
+        try:
+            send_telegram_html(f"<b>Exception in analyze()</b>\n<code>{e}</code>")
+        except Exception:
+            pass
+        return 3
+
+    if not result:
+        # fallback path: try CoinGecko price
+        print("WARN: analyze() returned None or empty -> using fallback price.")
+        price_fb = coingecko_price()
+        if price_fb is not None:
+            msg = build_html_message({"price": price_fb, "score": 0.5, "verdict": "NEUTRAL / WAIT (fallback price)",
+                                      "signals": {"trend":0.5,"volume":0.5,"rsi":0.5,"funding":0.5,"fear_greed":0.5,"volatility":0.5}}, fallback=True)
+            ok, info = send_telegram_html(msg)
+            print("INFO: Telegram fallback send ok?", ok, "info:", info)
+            return 0 if ok else 4
+        else:
+            send_telegram_html("<b>⚠️ BTC fallback failed</b>\n<code>analyze returned None and CoinGecko failed</code>")
+            return 5
+
+    # normal path: we have result dict
+    msg = build_html_message(result, fallback=False)
+    ok, info = send_telegram_html(msg)
+    print("INFO: Telegram send ok?", ok, "info:", info)
+    if ok:
+        return 0
+    else:
+        # try fallback price if send failed
+        price_fb = coingecko_price()
+        if price_fb is not None:
+            fbmsg = build_html_message({"price": price_fb, "score": 0.5, "verdict": "NEUTRAL / WAIT (fallback price)", "signals": {}}, fallback=True)
+            ok2, info2 = send_telegram_html(fbmsg)
+            print("INFO: fallback-only send ok?", ok2, "info:", info2)
+            return 0 if ok2 else 6
+        return 7
 
 if __name__ == "__main__":
     rc = main()
