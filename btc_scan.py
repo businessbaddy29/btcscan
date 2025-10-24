@@ -190,135 +190,200 @@ def fetch_fear_and_greed():
 
 # -------- Main logic --------
 def analyze():
-    logging.info("Fetching klines from Binance/CoinGecko...")
-    try:
-        df = fetch_binance_klines()
-    except Exception as e:
-        logging.exception("Failed to fetch klines: %s", e)
-        return None
+    """
+    Robust analyze() that falls back to CoinGecko price when Binance or other APIs fail.
+    Returns a dict: {"price", "score", "verdict", "signals"}
+    """
 
-    if df is None or df.empty:
-        logging.error("No kline data available.")
-        return None
-
-    # unify: if close_time is index or column, ensure column exists
-    if "close_time" not in df.columns and df.index.name is not None:
-        df = df.reset_index().rename(columns={df.index.name: "close_time"})
-    df.set_index("close_time", inplace=True)
-    df.sort_index(inplace=True)
-
-    # Ensure required numeric columns exist (CoinGecko fallback returns open/high/low/close/volume)
-    for col in ["open","high","low","close","volume"]:
-        if col not in df.columns:
-            logging.error("Missing required column in kline df: %s", col)
+    # Helper: fallback price from CoinGecko
+    def coingecko_price():
+        try:
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                             params={"ids":"bitcoin","vs_currencies":"usd"}, timeout=10)
+            r.raise_for_status()
+            j = r.json()
+            return float(j.get("bitcoin", {}).get("usd"))
+        except Exception as e:
+            print("CoinGecko fetch failed:", e)
             return None
 
-    df["MA50"] = sma(df["close"], 50)
-    df["MA200"] = sma(df["close"], 200)
-    df["RSI14"] = compute_rsi(df["close"], RSI_PERIOD)
-    df["vol_7avg"] = df["volume"].rolling(7).mean()
-
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    price = float(latest["close"])
-    ma50 = float(latest["MA50"]) if not pd.isna(latest["MA50"]) else float("nan")
-    ma200 = float(latest["MA200"]) if not pd.isna(latest["MA200"]) else float("nan")
-    rsi = float(latest["RSI14"]) if not pd.isna(latest["RSI14"]) else float("nan")
-    vol = float(latest["volume"])
-    vol7 = float(df["vol_7avg"].iloc[-1]) if not pd.isna(df["vol_7avg"].iloc[-1]) else 0.0
-    volatility_14 = float(df["close"].pct_change().rolling(14).std().iloc[-1])
-
-    logging.info("Time (UTC): %s", df.index[-1])
-    logging.info("Price: %.2f USDT", price)
-    logging.info("MA50: %.2f, MA200: %.2f", ma50 if not math.isnan(ma50) else float("nan"), ma200 if not math.isnan(ma200) else float("nan"))
-    logging.info("RSI(14): %.2f", rsi if not math.isnan(rsi) else float("nan"))
-    logging.info("Volume (24h): %f, 7-day avg: %f", vol, vol7)
-    logging.info("14-day vol (std): %f", volatility_14)
-
+    # Try fetching klines from Binance (safe try/except)
     try:
-        funding, fund_time = fetch_binance_funding_rate()
-        logging.info("Latest funding rate (Binance futures): %s at %s UTC", funding, fund_time)
+        print("Fetching klines from Binance...")
+        df = fetch_binance_klines()
+        if df is None or len(df) < 3:
+            raise RuntimeError("No klines data or insufficient rows")
     except Exception as e:
-        logging.warning("Funding rate fetch failed: %s", e)
-        funding = None
+        # Log the error and use fallback price
+        print("Warning: Binance klines fetch failed:", e)
+        price_fb = coingecko_price()
+        if price_fb is None:
+            # ultimate fallback: return a minimal neutral result
+            fallback_result = {
+                "price": None,
+                "score": 0.5,
+                "verdict": "NEUTRAL / WAIT (no price)",
+                "signals": {"trend": 0.5, "volume": 0.5, "rsi": 0.5, "funding": 0.5, "fear_greed": 0.5, "volatility": 0.5}
+            }
+            print("Returning neutral fallback result (no price)")
+            return fallback_result
+        else:
+            # create a minimal result using the fallback price
+            fallback_result = {
+                "price": price_fb,
+                "score": 0.5,
+                "verdict": "NEUTRAL / WAIT (fallback price)",
+                "signals": {"trend": 0.5, "volume": 0.5, "rsi": 0.5, "funding": 0.5, "fear_greed": 0.5, "volatility": 0.5}
+            }
+            print("Returning fallback result with CoinGecko price:", price_fb)
+            return fallback_result
 
+    # If here, df is valid — continue original calculations
     try:
-        fg_value, fg_class, fg_time = fetch_fear_and_greed()
-        logging.info("Fear & Greed: %s (%s) at %s", fg_value, fg_class, fg_time)
-    except Exception as e:
-        logging.warning("Fear & Greed fetch failed: %s", e)
-        fg_value = None
+        df.set_index("close_time", inplace=True)
+        df.sort_index(inplace=True)
 
+        df["MA50"] = sma(df["close"], 50)
+        df["MA200"] = sma(df["close"], 200)
+        df["RSI14"] = compute_rsi(df["close"], RSI_PERIOD)
+        df["vol_7avg"] = df["volume"].rolling(7).mean()
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        price = float(latest["close"])
+        ma50 = latest["MA50"]
+        ma200 = latest["MA200"]
+        rsi = latest["RSI14"]
+        vol = latest["volume"]
+        vol7 = latest["vol_7avg"]
+        volatility_14 = df["close"].pct_change().rolling(14).std().iloc[-1]
+
+        print(f"\nTime (UTC): {df.index[-1]}")
+        print(f"Price: {price:.2f} USDT")
+        print(f"MA50: {ma50}, MA200: {ma200}")
+        print(f"RSI(14): {rsi}")
+        print(f"Volume (24h): {vol}, 7-day avg: {vol7}")
+        print(f"14-day vol (std): {volatility_14}")
+
+    except Exception as e:
+        print("Error processing klines dataframe:", e)
+        # fallback to CoinGecko if something goes wrong after fetching
+        price_fb = coingecko_price()
+        if price_fb is not None:
+            return {
+                "price": price_fb,
+                "score": 0.5,
+                "verdict": "NEUTRAL / WAIT (post-fetch fallback)",
+                "signals": {"trend": 0.5, "volume": 0.5, "rsi": 0.5, "funding": 0.5, "fear_greed": 0.5, "volatility": 0.5}
+            }
+        return {
+            "price": None,
+            "score": 0.5,
+            "verdict": "NEUTRAL / WAIT (error)",
+            "signals": {"trend": 0.5, "volume": 0.5, "rsi": 0.5, "funding": 0.5, "fear_greed": 0.5, "volatility": 0.5}
+        }
+
+    # -------- continue original signal logic --------
     signals = {}
 
     # Trend signal
-    if math.isnan(ma50) or math.isnan(ma200):
-        trend_signal = 0.5
-    else:
-        if price > ma50 and price > ma200:
-            trend_signal = 1.0
-        elif price < ma50 and price < ma200:
-            trend_signal = 0.0
-        else:
+    try:
+        if ma50 is None or ma200 is None or math.isnan(ma50) or math.isnan(ma200):
             trend_signal = 0.5
+        else:
+            if price > ma50 and price > ma200:
+                trend_signal = 1.0
+            elif price < ma50 and price < ma200:
+                trend_signal = 0.0
+            else:
+                trend_signal = 0.5
+    except Exception:
+        trend_signal = 0.5
     signals["trend"] = trend_signal
 
     # Volume signal
-    if vol7 == 0 or np.isnan(vol7):
-        volume_signal = 0.5
-    else:
-        mult = vol / vol7
-        if mult >= THRESHOLDS["volume_multiplier"]:
-            volume_signal = 1.0
-        elif mult < 0.8:
-            volume_signal = 0.0
-        else:
+    try:
+        if vol7 is None or np.isnan(vol7) or vol7 == 0:
             volume_signal = 0.5
+        else:
+            mult = vol / vol7
+            if mult >= THRESHOLDS["volume_multiplier"]:
+                volume_signal = 1.0
+            elif mult < 0.8:
+                volume_signal = 0.0
+            else:
+                volume_signal = 0.5
+    except Exception:
+        volume_signal = 0.5
     signals["volume"] = volume_signal
 
     # RSI signal
-    if np.isnan(rsi):
-        rsi_signal = 0.5
-    else:
-        if rsi >= THRESHOLDS["rsi_overbought"]:
-            rsi_signal = 0.0
-        elif rsi <= THRESHOLDS["rsi_oversold"]:
-            rsi_signal = 1.0
+    try:
+        if rsi is None or np.isnan(rsi):
+            rsi_signal = 0.5
         else:
-            rsi_signal = 1 - ((rsi - THRESHOLDS["rsi_oversold"]) / (THRESHOLDS["rsi_overbought"] - THRESHOLDS["rsi_oversold"]))
-            rsi_signal = max(0.0, min(1.0, rsi_signal))
+            if rsi >= THRESHOLDS["rsi_overbought"]:
+                rsi_signal = 0.0
+            elif rsi <= THRESHOLDS["rsi_oversold"]:
+                rsi_signal = 1.0
+            else:
+                rsi_signal = 1 - ((rsi - THRESHOLDS["rsi_oversold"]) / (THRESHOLDS["rsi_overbought"] - THRESHOLDS["rsi_oversold"]))
+                rsi_signal = max(0.0, min(1.0, rsi_signal))
+    except Exception:
+        rsi_signal = 0.5
     signals["rsi"] = rsi_signal
 
     # Funding signal
-    if funding is None:
-        funding_signal = 0.5
-    else:
-        if funding >= THRESHOLDS["funding_high"]:
-            funding_signal = 0.0
-        elif funding <= -THRESHOLDS["funding_high"]:
-            funding_signal = 1.0
+    try:
+        funding, fund_time = None, None
+        try:
+            funding, fund_time = fetch_binance_funding_rate()
+        except Exception as e:
+            print("Funding fetch failed:", e)
+            funding = None
+
+        if funding is None:
+            funding_signal = 0.5
         else:
-            funding_signal = 0.5 - (funding / (2*THRESHOLDS["funding_high"]))
-            funding_signal = max(0.0, min(1.0, funding_signal))
+            if funding >= THRESHOLDS["funding_high"]:
+                funding_signal = 0.0
+            elif funding <= -THRESHOLDS["funding_high"]:
+                funding_signal = 1.0
+            else:
+                funding_signal = 0.5 - (funding / (2*THRESHOLDS["funding_high"]))
+                funding_signal = max(0.0, min(1.0, funding_signal))
+    except Exception:
+        funding_signal = 0.5
     signals["funding"] = funding_signal
 
     # Fear & Greed signal
-    if fg_value is None:
-        fg_signal = 0.5
-    else:
-        if fg_value >= THRESHOLDS["fear_greed_greedy"]:
-            fg_signal = 0.0
-        elif fg_value <= THRESHOLDS["fear_greed_fearful"]:
-            fg_signal = 1.0
+    try:
+        try:
+            fg_value, fg_class, fg_time = fetch_fear_and_greed()
+        except Exception as e:
+            print("Fear & Greed fetch failed:", e)
+            fg_value = None
+        if fg_value is None:
+            fg_signal = 0.5
         else:
-            fg_signal = 1 - ((fg_value - THRESHOLDS["fear_greed_fearful"]) / (THRESHOLDS["fear_greed_greedy"] - THRESHOLDS["fear_greed_fearful"]))
-            fg_signal = max(0.0, min(1.0, fg_signal))
+            if fg_value >= THRESHOLDS["fear_greed_greedy"]:
+                fg_signal = 0.0
+            elif fg_value <= THRESHOLDS["fear_greed_fearful"]:
+                fg_signal = 1.0
+            else:
+                fg_signal = 1 - ((fg_value - THRESHOLDS["fear_greed_fearful"]) / (THRESHOLDS["fear_greed_greedy"] - THRESHOLDS["fear_greed_fearful"]))
+                fg_signal = max(0.0, min(1.0, fg_signal))
+    except Exception:
+        fg_signal = 0.5
     signals["fear_greed"] = fg_signal
 
     # Volatility signal
-    vol_norm = min(0.1, volatility_14) / 0.1
-    volatility_signal = 1 - vol_norm
+    try:
+        vol_norm = min(0.1, volatility_14) / 0.1 if volatility_14 is not None else 0.0
+        volatility_signal = 1 - vol_norm
+    except Exception:
+        volatility_signal = 0.5
     signals["volatility"] = volatility_signal
 
     # Weighted score
@@ -326,7 +391,7 @@ def analyze():
     score = 0.0
     for k,w in WEIGHTS.items():
         score += signals.get(k, 0.5) * w
-    score = score / total_weight
+    score = score / total_weight if total_weight else 0.5
 
     # Verdict
     if score >= 0.6:
@@ -336,19 +401,17 @@ def analyze():
     else:
         verdict = "NEUTRAL / WAIT"
 
-    logging.info("--- SIGNALS ---")
+    print("\n--- SIGNALS ---")
     for k,v in signals.items():
-        logging.info("%s: %.3f", k, v)
-    logging.info("Weighted score: %.3f  => %s", score, verdict)
-
-    # Build result object (use numpy floats if needed to preserve original output style)
-    result = {
-        "price": np.float64(price),
-        "score": np.float64(score),
+        print(f"{k:10s}: {v:.3f}")
+    print(f"\nWeighted score: {score:.3f}  => {verdict}\n")
+    return {
+        "price": price,
+        "score": score,
         "verdict": verdict,
-        "signals": {k: (np.float64(v) if isinstance(v, float) else v) for k,v in signals.items()}
+        "signals": signals
     }
-    return result
+
 
 # -------- Telegram alert (uses env vars) --------
 def send_telegram_message_obj(result):
