@@ -58,87 +58,79 @@ def verdict_emoji(verdict_str):
 
 def build_html_message(result, fallback=False):
     """
-    Builds a nice HTML message. Uses bold labels and <pre> for monospace numeric block.
+    Builds a nice HTML message. Uses bold labels and <code> for monospace numeric block.
+    Also appends a short Hindi summary based on the score.
     """
     if not result or not isinstance(result, dict):
         # fallback simple message
-        price = coingecko_price()
-        if price is None:
-            return "<b>📊 BTC Update</b>\n<pre>No price available</pre>"
-        return f"<b>📊 BTC Fallback Update</b>\n<pre>price: {price:.2f} USD</pre>"
+        price = None
+        if isinstance(result, (int, float)):
+            price = result
+        if price is not None:
+            return f"<b>📊 BTC Fallback Update</b>\n<pre>price: {price:.2f} USD</pre>\n\n<i>💬 डेटा सीमित है — यह fallback सूचना है।</i>"
+        return "<b>📊 BTC Update</b>\n<pre>No price available</pre>\n\n<i>💬 डेटा उपलब्ध नहीं है।</i>"
 
-    price = result.get("price")
-    score = result.get("score")
+    # safe conversion helper
+    def safe_num(x, digits=3):
+        try:
+            return float(x)
+        except Exception:
+            return x
+
+    price = safe_num(result.get("price"))
+    score = safe_num(result.get("score"))
     verdict = result.get("verdict", "NEUTRAL / WAIT")
     signals = result.get("signals", {})
 
+    # verdict emoji
+    def verdict_emoji(vstr):
+        v = (vstr or "").upper()
+        if "BUY" in v:
+            return "🟢"
+        if "SELL" in v:
+            return "🔴"
+        return "🟡"
+
     emoji = verdict_emoji(verdict)
 
-    # Format signals lines
-    sig_lines = []
-    order = ["trend","volume","rsi","funding","fear_greed","volatility"]
-    for k in order:
-        if k in signals:
-            val = signals[k]
-            try:
-                val = float(val)
-                s = f"{val:.3f}"
-            except Exception:
-                s = str(val)
-            sig_lines.append(f"<b>{k.capitalize():10s}</b>: <code>{s}</code>")
-
-    # Construct message
     header = "📊 <b>BTC Update</b>"
     if fallback:
         header = "📊 <b>BTC Fallback Update</b>"
 
-    price_line = f"<b>Price:</b> <code>{price:.2f} USD</code>" if price is not None else "<b>Price:</b> <code>n/a</code>"
-    score_line = f"<b>Score:</b> <code>{float(score):.3f}</code>" if score is not None else "<b>Score:</b> <code>n/a</code>"
+    price_line = f"<b>Price:</b> <code>{price:.2f} USD</code>" if isinstance(price, float) else "<b>Price:</b> <code>n/a</code>"
+    score_line = f"<b>Score:</b> <code>{score:.3f}</code>" if isinstance(score, float) else "<b>Score:</b> <code>n/a</code>"
     verdict_line = f"<b>Verdict:</b> {emoji} <b>{verdict}</b>"
 
-    # join
-    body = "\n".join([header, price_line, score_line, verdict_line, "", "<b>Signals</b>"] + sig_lines)
-    # wrap small spacing via HTML pre-like block for signals readability
-    return body
+    # signals in fixed order
+    order = ["trend","volume","rsi","funding","fear_greed","volatility"]
+    sig_lines = []
+    for k in order:
+        if k in signals:
+            v = signals[k]
+            try:
+                vnum = float(v)
+                sig_lines.append(f"<b>{k.capitalize():10s}</b>: <code>{vnum:.3f}</code>")
+            except Exception:
+                sig_lines.append(f"<b>{k.capitalize():10s}</b>: <code>{v}</code>")
 
-def main():
-    print("DEBUG: Starting run_once at", time.strftime("%Y-%m-%d %H:%M:%S"))
-    print("DEBUG: TELEGRAM present?", bool(TELEGRAM_TOKEN), bool(TELEGRAM_CHAT_ID))
+    parts = [header, price_line, score_line, verdict_line, "", "<b>Signals</b>"] + sig_lines
 
-    try:
-        result = analyze()
-        print("DEBUG: analyze() returned:", repr(result))
-    except Exception as e:
-        print("ERROR: Exception in analyze()", e)
-        traceback.print_exc()
-        send_telegram_html(f"<b>Exception in analyze()</b>\n<code>{e}</code>")
-        return 3
-
-    if not result:
-        # fallback path
-        price_fb = coingecko_price()
-        if price_fb is not None:
-            msg = build_html_message({"price": price_fb, "score": 0.5, "verdict": "NEUTRAL / WAIT (fallback price)", "signals": {"trend":0.5,"volume":0.5,"rsi":0.5,"funding":0.5,"fear_greed":0.5,"volatility":0.5}}, fallback=True)
-            ok, info = send_telegram_html(msg)
-            print("INFO: Telegram fallback send ok?", ok, "info:", info)
-            return 0 if ok else 4
+    # ---- Summary section (Hindi) ----
+    summary = ""
+    if isinstance(score, float):
+        if score >= 0.6:
+            summary = "📈 मार्केट मज़बूत है — खरीदारी का माहौल है।"
+        elif score <= 0.4:
+            summary = "📉 मार्केट कमजोर है — बिकवाली का दबाव है।"
         else:
-            send_telegram_html("<b>⚠️ BTC fallback failed</b>\n<code>analyze returned None and CoinGecko failed</code>")
-            return 5
+            summary = "💬 मार्केट स्थिर है — अभी इंतज़ार करना बेहतर है।"
+    else:
+        summary = "💬 डेटा अधूरा है, कृपया थोड़ी देर बाद पुनः जाँच करें।"
 
-    # Build and send nicely formatted message
-    msg = build_html_message(result, fallback=False)
-    ok, info = send_telegram_html(msg)
-    print("INFO: Telegram send ok?", ok, "info:", info)
-    if not ok:
-        # try fallback price-only message
-        price_fb = coingecko_price()
-        if price_fb is not None:
-            fbmsg = build_html_message({"price": price_fb, "score": 0.5, "verdict": "NEUTRAL / WAIT (fallback price)", "signals": {}}, fallback=True)
-            ok2, info2 = send_telegram_html(fbmsg)
-            print("INFO: fallback-only send ok?", ok2, "info:", info2)
-            return 0 if ok2 else 6
-        return 7
+    parts.append("")
+    parts.append(f"<i>{summary}</i>")
+
+    return "\n".join(parts)
 
 if __name__ == "__main__":
     rc = main()
