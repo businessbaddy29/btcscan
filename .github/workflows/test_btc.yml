@@ -1,0 +1,37 @@
+name: BTC Scanner Test (Every 10 sec)
+
+on:
+  workflow_dispatch:  # Manual trigger only for testing
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5  # prevent infinite loops
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run BTC Scan in test loop
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        echo "Starting 10-second BTC test loop..."
+        for i in {1..6}; do  # 6 times = 1 minute test
+          echo "Run $i..."
+          python run_once.py
+          echo "Sleeping 10 seconds..."
+          sleep 10
+        done
+        echo "Test loop finished!"
