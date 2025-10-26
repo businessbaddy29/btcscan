@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # run_once.py - robust single-shot runner with pretty Telegram HTML messages
+# Updated: read BOT_TOKEN / GROUP_ID / CHANNEL_ID env names used by Actions
 
 import os
 import sys
@@ -11,26 +12,58 @@ repo_root = os.path.dirname(__file__)
 sys.path.insert(0, repo_root)
 
 # environment secrets (do NOT hardcode)
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Prefer BOT_TOKEN / GROUP_ID / CHANNEL_ID, but support older TELEGRAM_* names for compatibility
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+GROUP_ID = os.environ.get("GROUP_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+CHANNEL_ID = os.environ.get("CHANNEL_ID")  # optional
+OWNER_ID = os.environ.get("OWNER_ID")      # optional
 
-def send_telegram_html(html_text):
-    """Send message using Telegram sendMessage with HTML parse_mode."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set.")
-        return False, "no-token"
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_telegram_html_for_chat(chat_id, html_text):
+    """Send message to a specific chat_id using Telegram sendMessage with HTML parse_mode."""
+    if not BOT_TOKEN or not chat_id:
+        # don't print token; only indicate presence/absence
+        print("ERROR: BOT_TOKEN or chat_id not set.")
+        return False, "no-token-or-chat"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": html_text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
     try:
         r = requests.post(url, json=payload, timeout=15)
-        return (r.status_code == 200), r.text
+        # try to return parsed json when possible
+        try:
+            j = r.json()
+            ok = j.get("ok", False)
+            return ok, j
+        except Exception:
+            return (r.status_code == 200), r.text
     except Exception as e:
         return False, str(e)
+
+def send_to_targets(html_text):
+    """Send the html_text to configured targets: GROUP_ID and CHANNEL_ID (if provided)."""
+    targets = []
+    if GROUP_ID:
+        targets.append(GROUP_ID)
+    if CHANNEL_ID and CHANNEL_ID != GROUP_ID:
+        targets.append(CHANNEL_ID)
+
+    if not targets:
+        print("WARN: No GROUP_ID or CHANNEL_ID configured to send message to.")
+        return False, "no-targets"
+
+    all_ok = True
+    last_resp = None
+    for t in targets:
+        ok, resp = send_telegram_html_for_chat(t, html_text)
+        print(f"INFO: send to {t} ok? {ok}")
+        if not ok:
+            all_ok = False
+            last_resp = resp
+    return all_ok, last_resp
 
 # Try to import analyze from btc_scan
 try:
@@ -39,9 +72,9 @@ try:
 except Exception as e:
     print("ERROR: could not import analyze() from btc_scan.py:", e)
     traceback.print_exc()
-    # best-effort notify
+    # best-effort notify (use whatever token/chat is configured)
     try:
-        send_telegram_html(f"<b>btc_scan import failed</b>\n<code>{e}</code>")
+        send_to_targets(f"<b>btc_scan import failed</b>\n<code>{e}</code>")
     except Exception:
         pass
     sys.exit(2)
@@ -136,7 +169,8 @@ def build_html_message(result, fallback=False):
 
 def main():
     print("DEBUG: Starting run_once at", time.strftime("%Y-%m-%d %H:%M:%S"))
-    print("DEBUG: TELEGRAM present?", bool(TELEGRAM_TOKEN), bool(TELEGRAM_CHAT_ID))
+    # avoid printing token values; only indicate presence
+    print("DEBUG: BOT_TOKEN present?", bool(BOT_TOKEN), "GROUP_ID present?", bool(GROUP_ID), "CHANNEL_ID present?", bool(CHANNEL_ID))
 
     try:
         result = analyze()
@@ -145,7 +179,7 @@ def main():
         print("ERROR: Exception when running analyze():", e)
         traceback.print_exc()
         try:
-            send_telegram_html(f"<b>Exception in analyze()</b>\n<code>{e}</code>")
+            send_to_targets(f"<b>Exception in analyze()</b>\n<code>{e}</code>")
         except Exception:
             pass
         return 3
@@ -157,16 +191,16 @@ def main():
         if price_fb is not None:
             msg = build_html_message({"price": price_fb, "score": 0.5, "verdict": "NEUTRAL / WAIT (fallback price)",
                                       "signals": {"trend":0.5,"volume":0.5,"rsi":0.5,"funding":0.5,"fear_greed":0.5,"volatility":0.5}}, fallback=True)
-            ok, info = send_telegram_html(msg)
+            ok, info = send_to_targets(msg)
             print("INFO: Telegram fallback send ok?", ok, "info:", info)
             return 0 if ok else 4
         else:
-            send_telegram_html("<b>⚠️ BTC fallback failed</b>\n<code>analyze returned None and CoinGecko failed</code>")
+            send_to_targets("<b>⚠️ BTC fallback failed</b>\n<code>analyze returned None and CoinGecko failed</code>")
             return 5
 
     # normal path: we have result dict
     msg = build_html_message(result, fallback=False)
-    ok, info = send_telegram_html(msg)
+    ok, info = send_to_targets(msg)
     print("INFO: Telegram send ok?", ok, "info:", info)
     if ok:
         return 0
@@ -175,7 +209,7 @@ def main():
         price_fb = coingecko_price()
         if price_fb is not None:
             fbmsg = build_html_message({"price": price_fb, "score": 0.5, "verdict": "NEUTRAL / WAIT (fallback price)", "signals": {}}, fallback=True)
-            ok2, info2 = send_telegram_html(fbmsg)
+            ok2, info2 = send_to_targets(fbmsg)
             print("INFO: fallback-only send ok?", ok2, "info:", info2)
             return 0 if ok2 else 6
         return 7
