@@ -11,11 +11,9 @@ jobs:
 
     # Environment variables (mapped from repository secrets)
     env:
-      # Primary secret names (recommended)
-      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      GROUP_ID: ${{ secrets.GROUP_ID }}
-      CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-      OWNER_ID: ${{ secrets.OWNER_ID }}
+  BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+  ALLOWED_CHAT_IDS: ${{ secrets.ALLOWED_CHAT_IDS }}
+  OWNER_ID: ${{ secrets.OWNER_ID }}
 
       # Backwards-compatible names (in case your code expects these)
       TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
