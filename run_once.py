@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # run_once.py - robust single-shot runner with pretty Telegram HTML messages
-# Updated: read BOT_TOKEN / GROUP_ID / CHANNEL_ID env names used by Actions
+# Updated: support ALLOWED_CHAT_IDS (single secret, comma-separated) + backwards compatibility
 
 import os
 import sys
@@ -12,10 +12,11 @@ repo_root = os.path.dirname(__file__)
 sys.path.insert(0, repo_root)
 
 # environment secrets (do NOT hardcode)
-# Prefer BOT_TOKEN / GROUP_ID / CHANNEL_ID, but support older TELEGRAM_* names for compatibility
+# Prefer BOT_TOKEN and ALLOWED_CHAT_IDS; fallback to older names for compatibility
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-GROUP_ID = os.environ.get("GROUP_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-CHANNEL_ID = os.environ.get("CHANNEL_ID")  # optional
+ALLOWED_CHAT_IDS = os.environ.get("ALLOWED_CHAT_IDS")  # preferred single secret
+GROUP_ID = os.environ.get("GROUP_ID") or os.environ.get("TELEGRAM_CHAT_ID")  # fallback
+CHANNEL_ID = os.environ.get("CHANNEL_ID")  # optional fallback
 OWNER_ID = os.environ.get("OWNER_ID")      # optional
 
 def send_telegram_html_for_chat(chat_id, html_text):
@@ -43,16 +44,31 @@ def send_telegram_html_for_chat(chat_id, html_text):
     except Exception as e:
         return False, str(e)
 
-def send_to_targets(html_text):
-    """Send the html_text to configured targets: GROUP_ID and CHANNEL_ID (if provided)."""
+# ---- New: parse ALLOWED_CHAT_IDS and unified send_to_targets ----
+def parse_allowed_chat_ids():
+    """
+    Return list of chat ids (strings).
+    Prefer ALLOWED_CHAT_IDS (comma-separated). Else fallback to GROUP_ID/CHANNEL_ID.
+    """
     targets = []
+    if ALLOWED_CHAT_IDS:
+        for part in ALLOWED_CHAT_IDS.split(','):
+            p = part.strip()
+            if p:
+                targets.append(p)
+        return targets
+    # fallback single values (old setup)
     if GROUP_ID:
         targets.append(GROUP_ID)
     if CHANNEL_ID and CHANNEL_ID != GROUP_ID:
         targets.append(CHANNEL_ID)
+    return targets
 
+def send_to_targets(html_text):
+    """Send the html_text to configured targets from parse_allowed_chat_ids()."""
+    targets = parse_allowed_chat_ids()
     if not targets:
-        print("WARN: No GROUP_ID or CHANNEL_ID configured to send message to.")
+        print("WARN: No targets configured in ALLOWED_CHAT_IDS or GROUP_ID/CHANNEL_ID.")
         return False, "no-targets"
 
     all_ok = True
@@ -64,6 +80,7 @@ def send_to_targets(html_text):
             all_ok = False
             last_resp = resp
     return all_ok, last_resp
+# ---- end new block ----
 
 # Try to import analyze from btc_scan
 try:
@@ -170,7 +187,7 @@ def build_html_message(result, fallback=False):
 def main():
     print("DEBUG: Starting run_once at", time.strftime("%Y-%m-%d %H:%M:%S"))
     # avoid printing token values; only indicate presence
-    print("DEBUG: BOT_TOKEN present?", bool(BOT_TOKEN), "GROUP_ID present?", bool(GROUP_ID), "CHANNEL_ID present?", bool(CHANNEL_ID))
+    print("DEBUG: BOT_TOKEN present?", bool(BOT_TOKEN), "ALLOWED_CHAT_IDS present?", bool(ALLOWED_CHAT_IDS), "GROUP_ID present?", bool(GROUP_ID), "CHANNEL_ID present?", bool(CHANNEL_ID))
 
     try:
         result = analyze()
